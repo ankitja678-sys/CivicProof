@@ -73,6 +73,14 @@ export default function LoginPage() {
               placeholder="you@example.com"
             />
           </div>
+          <div className="text-right">
+  <Link
+    href="/forgot-password"
+    className="text-sm text-cyan-400 hover:text-cyan-300"
+  >
+    Forgot Password?
+  </Link>
+</div>
 
           <div>
             <label htmlFor="password" className="mb-2 block">
