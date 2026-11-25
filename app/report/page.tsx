@@ -3,20 +3,51 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
-const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
+const MAX_FILE_SIZE = 5 * 1024 * 1024;
 const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp"];
 
 export default function ReportPage() {
+  const router = useRouter();
+
   const [category, setCategory] = useState("Road Damage");
   const [description, setDescription] = useState("");
   const [location, setLocation] = useState("");
   const [photo, setPhoto] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [loading, setLoading] = useState(false);
+  const [checkingAuth, setCheckingAuth] = useState(true);
   const [error, setError] = useState("");
   const [reportId, setReportId] = useState("");
+
+  useEffect(() => {
+    const supabase = createClient();
+    let cancelled = false;
+
+    async function checkUser() {
+      const {
+        data: { user },
+        error: authError,
+      } = await supabase.auth.getUser();
+
+      if (cancelled) return;
+
+      if (authError || !user) {
+        router.replace("/login");
+        return;
+      }
+
+      setCheckingAuth(false);
+    }
+
+    checkUser();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   useEffect(() => {
     if (!photo) {
@@ -59,67 +90,83 @@ export default function ReportPage() {
     setLoading(true);
 
     const supabase = createClient();
-    const id = crypto.randomUUID();
+    let uploadedPath: string | null = null;
 
     try {
-      let evidencePath: string | null = null;
+      // 1. Verify logged-in user
+      const {
+        data: { user },
+        error: authError,
+      } = await supabase.auth.getUser();
 
-      // 1. Upload evidence photo if one was selected
+      if (authError || !user) {
+        router.replace("/login");
+        return;
+      }
+
+      // 2. Generate report ID
+      const id = crypto.randomUUID();
+
+      // 3. Upload evidence into user's private folder
       if (photo) {
         const extension = photo.name.split(".").pop()?.toLowerCase();
 
-        if (!extension) {
-          throw new Error("Could not determine image file extension.");
+        if (!extension || !["jpg", "jpeg", "png", "webp"].includes(extension)) {
+          throw new Error("Invalid image extension.");
         }
 
-        evidencePath = `${id}/evidence.${extension}`;
+        uploadedPath = `${user.id}/${id}/evidence.${extension}`;
 
         const { error: uploadError } = await supabase.storage
           .from("civic-evidence")
-          .upload(evidencePath, photo, {
+          .upload(uploadedPath, photo, {
             contentType: photo.type,
             upsert: false,
           });
 
         if (uploadError) {
-          throw new Error(
-            `Photo upload failed: ${uploadError.message}`
-          );
+          throw new Error(`Photo upload failed: ${uploadError.message}`);
         }
       }
 
-      // 2. Save report details and photo path in database
+      // 4. Save report linked to authenticated user
       const { error: insertError } = await supabase
         .from("civic_reports")
         .insert({
           id,
+          user_id: user.id,
           category,
           description: description.trim(),
           location: location.trim(),
-          evidence_path: evidencePath,
+          evidence_path: uploadedPath,
+          status: "pending",
         });
 
       if (insertError) {
-        console.error("SUPABASE INSERT ERROR:", {
-          message: insertError.message,
-          code: insertError.code,
-          details: insertError.details,
-          hint: insertError.hint,
-        });
-
-        throw new Error(insertError.message);
+        throw new Error(`Report save failed: ${insertError.message}`);
       }
 
-      // 3. Show report confirmation
+      // 5. Show confirmation
       setReportId(id);
     } catch (err: unknown) {
       console.error("REPORT SUBMISSION FAILED:", err);
 
-      if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError("Something went wrong. Please try again.");
+      // Remove uploaded photo if database insert failed
+      if (uploadedPath) {
+        const { error: cleanupError } = await supabase.storage
+          .from("civic-evidence")
+          .remove([uploadedPath]);
+
+        if (cleanupError) {
+          console.error("Evidence cleanup failed:", cleanupError.message);
+        }
       }
+
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Something went wrong. Please try again."
+      );
     } finally {
       setLoading(false);
     }
@@ -134,6 +181,14 @@ export default function ReportPage() {
     setReportId("");
   }
 
+  if (checkingAuth) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-slate-950 text-white">
+        Checking your account...
+      </main>
+    );
+  }
+
   if (reportId) {
     return (
       <main className="min-h-screen bg-slate-950 px-6 py-16 text-white">
@@ -143,7 +198,7 @@ export default function ReportPage() {
           </h1>
 
           <p className="mb-8 text-lg text-slate-300">
-            Your report has been saved in the CivicProof database.
+            Your report is now linked to your CivicProof account.
           </p>
 
           <div className="mb-8 rounded-2xl bg-slate-900 p-6">
@@ -157,16 +212,14 @@ export default function ReportPage() {
 
             <button
               type="button"
-              onClick={() => {
-                navigator.clipboard.writeText(reportId);
-              }}
+              onClick={() => navigator.clipboard.writeText(reportId)}
               className="mt-4 text-emerald-400 underline"
             >
               Copy Report ID
             </button>
           </div>
 
-          <p className="mb-8 text-slate-300">
+          <p className="mb-4 text-slate-300">
             Status: Pending verification
           </p>
 
@@ -176,13 +229,22 @@ export default function ReportPage() {
             </p>
           )}
 
-          <button
-            type="button"
-            onClick={resetForm}
-            className="rounded-full bg-emerald-500 px-8 py-4 font-semibold text-slate-950 hover:bg-emerald-400"
-          >
-            Submit Another Report
-          </button>
+          <div className="flex flex-wrap gap-4">
+            <Link
+              href="/dashboard"
+              className="rounded-full bg-emerald-500 px-8 py-4 font-semibold text-slate-950 hover:bg-emerald-400"
+            >
+              Go to Dashboard
+            </Link>
+
+            <button
+              type="button"
+              onClick={resetForm}
+              className="rounded-full border border-slate-600 px-8 py-4 font-semibold hover:bg-slate-800"
+            >
+              Submit Another Report
+            </button>
+          </div>
         </div>
       </main>
     );
@@ -192,10 +254,10 @@ export default function ReportPage() {
     <main className="min-h-screen bg-slate-950 px-6 py-16 text-white">
       <div className="mx-auto max-w-3xl">
         <Link
-          href="/"
+          href="/dashboard"
           className="mb-8 inline-block text-emerald-400 hover:underline"
         >
-          ← Back to Home
+          ← Back to Dashboard
         </Link>
 
         <h1 className="mb-4 text-4xl font-bold">
@@ -212,10 +274,7 @@ export default function ReportPage() {
           className="space-y-6 rounded-3xl border border-slate-800 bg-slate-900/70 p-8"
         >
           <div>
-            <label
-              htmlFor="category"
-              className="mb-2 block font-medium"
-            >
+            <label htmlFor="category" className="mb-2 block font-medium">
               Issue Category
             </label>
 
@@ -235,10 +294,7 @@ export default function ReportPage() {
           </div>
 
           <div>
-            <label
-              htmlFor="description"
-              className="mb-2 block font-medium"
-            >
+            <label htmlFor="description" className="mb-2 block font-medium">
               Description
             </label>
 
@@ -253,16 +309,14 @@ export default function ReportPage() {
               placeholder="Describe the civic issue..."
               className="w-full rounded-xl border border-slate-700 bg-slate-950 p-4"
             />
+
             <p className="mt-1 text-sm text-slate-500">
               {description.length}/1000 characters
             </p>
           </div>
 
           <div>
-            <label
-              htmlFor="location"
-              className="mb-2 block font-medium"
-            >
+            <label htmlFor="location" className="mb-2 block font-medium">
               Issue Location
             </label>
 
@@ -279,10 +333,7 @@ export default function ReportPage() {
           </div>
 
           <div>
-            <label
-              htmlFor="photo"
-              className="mb-2 block font-medium"
-            >
+            <label htmlFor="photo" className="mb-2 block font-medium">
               Evidence Photo (Optional)
             </label>
 
